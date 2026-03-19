@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 
 from LabOne.CeaserCipher import CeaserCipher
+from LabTwo.NumericalGenerator import NumericalGenerator
 
 
 # ─────────────────────────── helpers ───────────────────────────
@@ -58,8 +59,9 @@ class CaesarTab(ttk.Frame):
         ttk.Button(btn_frame, text="[+] Encrypt",      command=self._encrypt).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="[-] Decrypt",      command=self._decrypt).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="[!] Brute-force",  command=self._brute_force).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="[X] Partial Cryptanalysis",  command=self._chi_squared).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="[X] Chi-squared",  command=self._chi_squared).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="[~] Frequency",    command=self._show_freq).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="[A] Frequency Crack", command=self._classic_crack).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="[x] Clear",        command=self._clear).pack(side="right", padx=4)
 
         # --- output field --------------------------------------
@@ -144,6 +146,30 @@ class CaesarTab(ttk.Frame):
         lines.append(results[0][2])
         self._write_output("\n".join(lines))
 
+    def _classic_crack(self):
+        cipher_text = self.input_txt.get("1.0", "end").strip().upper()
+        if not cipher_text:
+            messagebox.showwarning("Empty", "Please enter encrypted text")
+            return
+
+        shift, decrypted, mapping = self.cipher.classic_frequency_analysis(cipher_text)
+
+        lines = ["=== Classic Frequency Cryptanalysis ===", ""]
+        lines.append(f"Most frequent cipher letter -> mapped to 'E'")
+        lines.append(f"Detected shift: {shift}")
+        lines.append("")
+        lines.append("Frequency mapping (cipher vs English reference):")
+        lines.append(f"{'#':<4} {'Cipher':<9} {'Freq %':<10} {'English':<9} {'Ref %':<10}")
+        lines.append("-" * 46)
+        for rank, c_ch, c_fr, e_ch, e_fr in mapping:
+            marker = "  <--" if rank == 1 else ""
+            lines.append(f"{rank:<4} {c_ch:<9} {c_fr:>5.2f}%    {e_ch:<9} {e_fr:>5.2f}%{marker}")
+        lines.append("")
+        lines.append("=" * 46)
+        lines.append("Decrypted text:")
+        lines.append(decrypted)
+        self._write_output("\n".join(lines))
+
     def _show_freq(self):
         text = self.input_txt.get("1.0", "end").strip().upper()
         if not text:
@@ -162,6 +188,168 @@ class CaesarTab(ttk.Frame):
 
     def _clear(self):
         self.input_txt.delete("1.0", "end")
+        self.output_txt.delete("1.0", "end")
+
+
+# ──────────────────── Generator tab ────────────────────────────
+class GeneratorTab(ttk.Frame):
+    """Tab for pseudo-random number / bit generation (Lemer & BBS)."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.gen = NumericalGenerator()
+        self._build_ui()
+
+    # ── UI ──────────────────────────────────────────────────────
+    def _build_ui(self):
+        # --- method selector -----------------------------------
+        sel = ttk.LabelFrame(self, text="Method")
+        sel.pack(fill="x", padx=8, pady=4)
+
+        self.method_var = tk.StringVar(value="lemer")
+        ttk.Radiobutton(sel, text="Lemer (LCG)", variable=self.method_var,
+                        value="lemer", command=self._toggle_params).pack(side="left", padx=10, pady=4)
+        ttk.Radiobutton(sel, text="BBS", variable=self.method_var,
+                        value="bbs", command=self._toggle_params).pack(side="left", padx=10, pady=4)
+        ttk.Radiobutton(sel, text="BBS + Binance entropy", variable=self.method_var,
+                        value="bbs_binance", command=self._toggle_params).pack(side="left", padx=10, pady=4)
+
+        # --- parameters frame ----------------------------------
+        self.params_frame = ttk.LabelFrame(self, text="Parameters")
+        self.params_frame.pack(fill="x", padx=8, pady=4)
+        self.params_frame.columnconfigure(1, weight=1)
+
+        # Lemer params
+        self.lemer_n_var      = make_label_entry(self.params_frame, "Count (n):",      row=0, default="1000", width=20)
+        self.lemer_multi_var  = make_label_entry(self.params_frame, "Multiplier (a):",  row=1, default="16807", width=20)
+        self.lemer_mod_var    = make_label_entry(self.params_frame, "Modulus (m):",     row=2, default="2147483647", width=20)
+        self.lemer_seed_var   = make_label_entry(self.params_frame, "Seed:",            row=3, default="1007", width=20)
+
+        # BBS params (rows 4-7, hidden initially)
+        self.bbs_p_var       = make_label_entry(self.params_frame, "p (≡3 mod 4):",   row=4, default="2147483659", width=20)
+        self.bbs_q_var       = make_label_entry(self.params_frame, "q (≡3 mod 4):",   row=5, default="2147483743", width=20)
+        self.bbs_seed_var    = make_label_entry(self.params_frame, "Seed:",            row=6, default="123456789", width=20)
+        self.bbs_bits_var    = make_label_entry(self.params_frame, "Bits to generate:",row=7, default="1024", width=20)
+
+        # output format
+        fmt = ttk.Frame(self.params_frame)
+        fmt.grid(row=8, column=0, columnspan=2, sticky="w", padx=6, pady=4)
+        ttk.Label(fmt, text="Show as:").pack(side="left")
+        self.fmt_var = tk.StringVar(value="bits")
+        ttk.Radiobutton(fmt, text="Bitstream", variable=self.fmt_var, value="bits").pack(side="left", padx=8)
+        ttk.Radiobutton(fmt, text="Numbers",   variable=self.fmt_var, value="nums").pack(side="left", padx=8)
+
+        self._toggle_params()  # show/hide relevant rows
+
+        # --- buttons -------------------------------------------
+        btn = ttk.Frame(self)
+        btn.pack(fill="x", padx=8, pady=4)
+        ttk.Button(btn, text="▶  Generate", command=self._generate).pack(side="left", padx=4)
+        ttk.Button(btn, text="💾  Save to file", command=self._save).pack(side="left", padx=4)
+        ttk.Button(btn, text="✕  Clear",    command=self._clear).pack(side="right", padx=4)
+
+        # --- output --------------------------------------------
+        self.output_txt = make_text_block(self, "Output", height=14)
+
+    # ── show / hide params based on method ─────────────────────
+    def _toggle_params(self):
+        method = self.method_var.get()
+        lemer_rows = {0, 1, 2, 3}
+        bbs_rows   = {4, 5, 6, 7}
+
+        for widget in self.params_frame.winfo_children():
+            info = widget.grid_info()
+            if not info:
+                continue
+            r = int(info["row"])
+            if method == "lemer":
+                widget.grid() if r in lemer_rows or r == 8 else widget.grid_remove()
+            else:
+                widget.grid() if r in bbs_rows or r == 8 else widget.grid_remove()
+
+    # ── generation logic ───────────────────────────────────────
+    def _generate(self):
+        method = self.method_var.get()
+        try:
+            if method == "lemer":
+                result = self._run_lemer()
+            elif method == "bbs":
+                result = self._run_bbs()
+            else:
+                result = self._run_bbs_binance()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        self.output_txt.delete("1.0", "end")
+        self.output_txt.insert("1.0", result)
+
+    def _run_lemer(self):
+        n     = int(self.lemer_n_var.get())
+        multi = int(self.lemer_multi_var.get())
+        mod   = int(self.lemer_mod_var.get())
+        seed  = int(self.lemer_seed_var.get())
+        nums  = self.gen.LemerGenerator(n, multi, mod, seed)
+
+        if self.fmt_var.get() == "bits":
+            bits = NumericalGenerator.numbers_to_bitsream(nums)
+            return f"Lemer bitstream ({len(bits)} bits):\n\n{bits}"
+        return f"Lemer sequence ({len(nums)} numbers):\n\n" + "\n".join(str(x) for x in nums)
+
+    def _run_bbs(self):
+        p    = int(self.bbs_p_var.get())
+        q    = int(self.bbs_q_var.get())
+        seed = int(self.bbs_seed_var.get())
+        nbits = int(self.bbs_bits_var.get())
+        bits = self.gen.BBS(p, q, seed, nbits)
+        if bits is None:
+            raise ValueError("BBS returned nothing — check p, q, seed constraints.")
+
+        if self.fmt_var.get() == "nums":
+            nums = NumericalGenerator.bitsream_to_numbers(bits, 32)
+            return f"BBS → numbers ({len(nums)} values):\n\n" + "\n".join(str(x) for x in nums)
+        return f"BBS bitstream ({len(bits)} bits):\n\n{bits}"
+
+    def _run_bbs_binance(self):
+        p     = int(self.bbs_p_var.get())
+        q     = int(self.bbs_q_var.get())
+        nbits = int(self.bbs_bits_var.get())
+        n_val = p * q
+
+        # one Lemer value for entropy
+        lemer_val = self.gen.LemerGenerator(1, 16807, 2147483647, 99991)[0]
+        import math
+        raw_entropy = NumericalGenerator.get_entropy_from_binance(lemer_val)
+        s = (raw_entropy % (n_val - 2)) + 2
+        while math.gcd(s, n_val) != 1:
+            s = (s + 1) % n_val
+
+        bits = self.gen.BBS(p, q, s, nbits)
+        if bits is None:
+            raise ValueError("BBS returned nothing — check p, q constraints.")
+
+        header = f"BBS + Binance entropy (seed={s})\n"
+        if self.fmt_var.get() == "nums":
+            nums = NumericalGenerator.bitsream_to_numbers(bits, 32)
+            return header + f"{len(nums)} numbers:\n\n" + "\n".join(str(x) for x in nums)
+        return header + f"{len(bits)} bits:\n\n{bits}"
+
+    # ── save / clear ───────────────────────────────────────────
+    def _save(self):
+        content = self.output_txt.get("1.0", "end").strip()
+        if not content:
+            messagebox.showwarning("Empty", "Nothing to save — generate first.")
+            return
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            with open(path, "w") as f:
+                f.write(content)
+            messagebox.showinfo("Saved", f"Written to {path}")
+
+    def _clear(self):
         self.output_txt.delete("1.0", "end")
 
 
@@ -208,7 +396,7 @@ class CryptoApp(tk.Tk):
 
         # ── tabs ──
         self.notebook.add(CaesarTab(self.notebook),              text="  Caesar  ")
-        self.notebook.add(PlaceholderTab(self.notebook, "____"),    text="  ____  ")
+        self.notebook.add(GeneratorTab(self.notebook),             text="  PRNG  ")
         self.notebook.add(PlaceholderTab(self.notebook, "____"), text="  ____  ")
 
         # status bar
