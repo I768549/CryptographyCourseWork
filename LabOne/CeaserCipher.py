@@ -95,6 +95,42 @@ class CeaserCipher:
         return results[0][2]
         
         
+    def classic_frequency_analysis(self, encrypted_text):
+        """Classic frequency analysis: match cipher letter frequencies
+        to known English frequencies by rank to determine the shift."""
+        text = encrypted_text.upper()
+        freq = self.count_text_frequencies(text)
+
+        # sort cipher letters by frequency (descending)
+        cipher_ranked = sorted(freq.items(), key=lambda x: -x[1])
+        # sort english reference by frequency (descending)
+        english_ranked = sorted(self.english_freq.items(), key=lambda x: -x[1])
+
+        # most frequent cipher letter -> assume it maps to 'E'
+        top_cipher_letter = cipher_ranked[0][0]
+        top_english_letter = english_ranked[0][0]  # 'E'
+
+        shift = (ord(top_cipher_letter) - ord(top_english_letter)) % 26
+
+        # decrypt with the found shift
+        alphabet_index = {c: i for i, c in enumerate(self._alphabet)}
+        decrypted = ""
+        for ch in text:
+            if ch in alphabet_index:
+                idx = (alphabet_index[ch] - shift) % 26
+                decrypted += self._alphabet[idx]
+            else:
+                decrypted += ch
+
+        # build the mapping table for display
+        mapping = []
+        for i in range(min(26, len(cipher_ranked))):
+            c_letter, c_freq = cipher_ranked[i]
+            e_letter, e_freq = english_ranked[i]
+            mapping.append((i + 1, c_letter, c_freq, e_letter, e_freq))
+
+        return shift, decrypted, mapping
+
     def chi_squared(self, observed_frequencies):
         expected = self.english_freq
         itera = [((observed_frequencies[k]-expected[k])**2)/expected[k] for k in expected]
@@ -107,7 +143,6 @@ if __name__ == "__main__":
     key = 25
     encryptor = CeaserCipher()
     
-    # Тестовое сообщение
     plaintext = """
         What is Lorem Ipsum?`
         Lorem Ipsum is simply dummy text of the 
@@ -122,16 +157,13 @@ if __name__ == "__main__":
         rised in the 1960s with the release of Letraset   
     """
     
-    # Шифруем текст с заданным сдвигом
     moved_alphabet = encryptor.moved_alphabet_left(key)
     encrypted_text = encryptor.encrypt_text(plaintext.upper(), moved_alphabet)
     print(f"Encrypted text: {encrypted_text}\n")
     
-    # # Brute-force с ручной проверкой
     # print("Brute-force decryption (manual check):")
     # encryptor.brute_force(encrypted_text)
     
-    # Автоматическое взлом с chi-squared
     print("\nAutomatic crack using chi-squared:")
     decrypted_text = encryptor.partial_crypto_analysis(encrypted_text)
     print(f"Most likely decryption: {decrypted_text}")

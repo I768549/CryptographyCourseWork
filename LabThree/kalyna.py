@@ -1,0 +1,595 @@
+"""
+Kalyna-128/256 (ДСТУ 7624:2014) — реалізація з нуля.
+Блок: 128 біт, Ключ: 256 біт, Раунди: 14.
+Режим: CBC (Cipher Block Chaining).
+Автор: Лабораторна робота №3
+"""
+
+import os
+import struct
+from typing import List, Tuple
+
+# Константи
+BLOCK_SIZE = 16       # 128 біт = 16 байт
+KEY_SIZE = 32         # 256 біт = 32 байт
+NB = 2                # кількість 64-бітних слів у блоці (128 / 64)
+NK = 4                # кількість 64-бітних слів у ключі (256 / 64)
+NR = 14               # кількість раундів
+BITS_IN_WORD = 64
+REDUCTION_POLY = 0x1D  # x^8 + x^4 + x^3 + x^2 + 1 ( F(2^8)) AES uses 0x1B
+
+# S-box'и шифру Калина (4 штуки, чередуються по байтах)
+# ДСТУ 7624:2014
+S_BOX_ENC = [
+    # S0
+    [
+        0xa8, 0x43, 0x5f, 0x06, 0x6b, 0x75, 0x6c, 0x59, 0x71, 0xdf, 0x87, 0x95, 0x17, 0xf0, 0xd8, 0x09,
+        0x6d, 0xf3, 0x1d, 0xcb, 0xc9, 0x4d, 0x2c, 0xaf, 0x79, 0xe0, 0x97, 0xfd, 0x6f, 0x4b, 0x45, 0x39,
+        0x3e, 0xdd, 0xa3, 0x4f, 0xb4, 0xb6, 0x9a, 0x0e, 0x1f, 0xbf, 0x15, 0xe1, 0x49, 0xd2, 0x93, 0xc6,
+        0x92, 0x72, 0x9e, 0x61, 0xd1, 0x63, 0xfa, 0xee, 0xf4, 0x19, 0xd5, 0xad, 0x58, 0xa4, 0xbb, 0xa1,
+        0xdc, 0xf2, 0x83, 0x37, 0x42, 0xe4, 0x7a, 0x32, 0x9c, 0xcc, 0xab, 0x4a, 0x8f, 0x6e, 0x04, 0x27,
+        0x2e, 0xe7, 0xe2, 0x5a, 0x96, 0x16, 0x23, 0x2b, 0xc2, 0x65, 0x66, 0x0f, 0xbc, 0xa9, 0x47, 0x41,
+        0x34, 0x48, 0xfc, 0xb7, 0x6a, 0x88, 0xa5, 0x53, 0x86, 0xf9, 0x5b, 0xdb, 0x38, 0x7b, 0xc3, 0x1e,
+        0x22, 0x33, 0x24, 0x28, 0x36, 0xc7, 0xb2, 0x3b, 0x8e, 0x77, 0xba, 0xf5, 0x14, 0x9f, 0x08, 0x55,
+        0x9b, 0x4c, 0xfe, 0x60, 0x5c, 0xda, 0x18, 0x46, 0xcd, 0x7d, 0x21, 0xb0, 0x3f, 0x1b, 0x89, 0xff,
+        0xeb, 0x84, 0x69, 0x3a, 0x9d, 0xd7, 0xd3, 0x70, 0x67, 0x40, 0xb5, 0xde, 0x5d, 0x30, 0x91, 0xb1,
+        0x78, 0x11, 0x01, 0xe5, 0x00, 0x68, 0x98, 0xa0, 0xc5, 0x02, 0xa6, 0x74, 0x2d, 0x0b, 0xa2, 0x76,
+        0xb3, 0xbe, 0xce, 0xbd, 0xae, 0xe9, 0x8a, 0x31, 0x1c, 0xec, 0xf1, 0x99, 0x94, 0xaa, 0xf6, 0x26,
+        0x2f, 0xef, 0xe8, 0x8c, 0x35, 0x03, 0xd4, 0x7f, 0xfb, 0x05, 0xc1, 0x5e, 0x90, 0x20, 0x3d, 0x82,
+        0xf7, 0xea, 0x0a, 0x0d, 0x7e, 0xf8, 0x50, 0x1a, 0xc4, 0x07, 0x57, 0xb8, 0x3c, 0x62, 0xe3, 0xc8,
+        0xac, 0x52, 0x64, 0x10, 0xd0, 0xd9, 0x13, 0x0c, 0x12, 0x29, 0x51, 0xb9, 0xcf, 0xd6, 0x73, 0x8d,
+        0x81, 0x54, 0xc0, 0xed, 0x4e, 0x44, 0xa7, 0x2a, 0x85, 0x25, 0xe6, 0xca, 0x7c, 0x8b, 0x56, 0x80,
+    ],
+    # S1
+    [
+        0xce, 0xbb, 0xeb, 0x92, 0xea, 0xcb, 0x13, 0xc1, 0xe9, 0x3a, 0xd6, 0xb2, 0xd2, 0x90, 0x17, 0xf8,
+        0x42, 0x15, 0x56, 0xb4, 0x65, 0x1c, 0x88, 0x43, 0xc5, 0x5c, 0x36, 0xba, 0xf5, 0x57, 0x67, 0x8d,
+        0x31, 0xf6, 0x64, 0x58, 0x9e, 0xf4, 0x22, 0xaa, 0x75, 0x0f, 0x02, 0xb1, 0xdf, 0x6d, 0x73, 0x4d,
+        0x7c, 0x26, 0x2e, 0xf7, 0x08, 0x5d, 0x44, 0x3e, 0x9f, 0x14, 0xc8, 0xae, 0x54, 0x10, 0xd8, 0xbc,
+        0x1a, 0x6b, 0x69, 0xf3, 0xbd, 0x33, 0xab, 0xfa, 0xd1, 0x9b, 0x68, 0x4e, 0x16, 0x95, 0x91, 0xee,
+        0x4c, 0x63, 0x8e, 0x5b, 0xcc, 0x3c, 0x19, 0xa1, 0x81, 0x49, 0x7b, 0xd9, 0x6f, 0x37, 0x60, 0xca,
+        0xe7, 0x2b, 0x48, 0xfd, 0x96, 0x45, 0xfc, 0x41, 0x12, 0x0d, 0x79, 0xe5, 0x89, 0x8c, 0xe3, 0x20,
+        0x30, 0xdc, 0xb7, 0x6c, 0x4a, 0xb5, 0x3f, 0x97, 0xd4, 0x62, 0x2d, 0x06, 0xa4, 0xa5, 0x83, 0x5f,
+        0x2a, 0xda, 0xc9, 0x00, 0x7e, 0xa2, 0x55, 0xbf, 0x11, 0xd5, 0x9c, 0xcf, 0x0e, 0x0a, 0x3d, 0x51,
+        0x7d, 0x93, 0x1b, 0xfe, 0xc4, 0x47, 0x09, 0x86, 0x0b, 0x8f, 0x9d, 0x6a, 0x07, 0xb9, 0xb0, 0x98,
+        0x18, 0x32, 0x71, 0x4b, 0xef, 0x3b, 0x70, 0xa0, 0xe4, 0x40, 0xff, 0xc3, 0xa9, 0xe6, 0x78, 0xf9,
+        0x8b, 0x46, 0x80, 0x1e, 0x38, 0xe1, 0xb8, 0xa8, 0xe0, 0x0c, 0x23, 0x76, 0x1d, 0x25, 0x24, 0x05,
+        0xf1, 0x6e, 0x94, 0x28, 0x9a, 0x84, 0xe8, 0xa3, 0x4f, 0x77, 0xd3, 0x85, 0xe2, 0x52, 0xf2, 0x82,
+        0x50, 0x7a, 0x2f, 0x74, 0x53, 0xb3, 0x61, 0xaf, 0x39, 0x35, 0xde, 0xcd, 0x1f, 0x99, 0xac, 0xad,
+        0x72, 0x2c, 0xdd, 0xd0, 0x87, 0xbe, 0x5e, 0xa6, 0xec, 0x04, 0xc6, 0x03, 0x34, 0xfb, 0xdb, 0x59,
+        0xb6, 0xc2, 0x01, 0xf0, 0x5a, 0xed, 0xa7, 0x66, 0x21, 0x7f, 0x8a, 0x27, 0xc7, 0xc0, 0x29, 0xd7,
+    ],
+    # S2
+    [
+        0x93, 0xd9, 0x9a, 0xb5, 0x98, 0x22, 0x45, 0xfc, 0xba, 0x6a, 0xdf, 0x02, 0x9f, 0xdc, 0x51, 0x59,
+        0x4a, 0x17, 0x2b, 0xc2, 0x94, 0xf4, 0xbb, 0xa3, 0x62, 0xe4, 0x71, 0xd4, 0xcd, 0x70, 0x16, 0xe1,
+        0x49, 0x3c, 0xc0, 0xd8, 0x5c, 0x9b, 0xad, 0x85, 0x53, 0xa1, 0x7a, 0xc8, 0x2d, 0xe0, 0xd1, 0x72,
+        0xa6, 0x2c, 0xc4, 0xe3, 0x76, 0x78, 0xb7, 0xb4, 0x09, 0x3b, 0x0e, 0x41, 0x4c, 0xde, 0xb2, 0x90,
+        0x25, 0xa5, 0xd7, 0x03, 0x11, 0x00, 0xc3, 0x2e, 0x92, 0xef, 0x4e, 0x12, 0x9d, 0x7d, 0xcb, 0x35,
+        0x10, 0xd5, 0x4f, 0x9e, 0x4d, 0xa9, 0x55, 0xc6, 0xd0, 0x7b, 0x18, 0x97, 0xd3, 0x36, 0xe6, 0x48,
+        0x56, 0x81, 0x8f, 0x77, 0xcc, 0x9c, 0xb9, 0xe2, 0xac, 0xb8, 0x2f, 0x15, 0xa4, 0x7c, 0xda, 0x38,
+        0x1e, 0x0b, 0x05, 0xd6, 0x14, 0x6e, 0x6c, 0x7e, 0x66, 0xfd, 0xb1, 0xe5, 0x60, 0xaf, 0x5e, 0x33,
+        0x87, 0xc9, 0xf0, 0x5d, 0x6d, 0x3f, 0x88, 0x8d, 0xc7, 0xf7, 0x1d, 0xe9, 0xec, 0xed, 0x80, 0x29,
+        0x27, 0xcf, 0x99, 0xa8, 0x50, 0x0f, 0x37, 0x24, 0x28, 0x30, 0x95, 0xd2, 0x3e, 0x5b, 0x40, 0x83,
+        0xb3, 0x69, 0x57, 0x1f, 0x07, 0x1c, 0x8a, 0xbc, 0x20, 0xeb, 0xce, 0x8e, 0xab, 0xee, 0x31, 0xa2,
+        0x73, 0xf9, 0xca, 0x3a, 0x1a, 0xfb, 0x0d, 0xc1, 0xfe, 0xfa, 0xf2, 0x6f, 0xbd, 0x96, 0xdd, 0x43,
+        0x52, 0xb6, 0x08, 0xf3, 0xae, 0xbe, 0x19, 0x89, 0x32, 0x26, 0xb0, 0xea, 0x4b, 0x64, 0x84, 0x82,
+        0x6b, 0xf5, 0x79, 0xbf, 0x01, 0x5f, 0x75, 0x63, 0x1b, 0x23, 0x3d, 0x68, 0x2a, 0x65, 0xe8, 0x91,
+        0xf6, 0xff, 0x13, 0x58, 0xf1, 0x47, 0x0a, 0x7f, 0xc5, 0xa7, 0xe7, 0x61, 0x5a, 0x06, 0x46, 0x44,
+        0x42, 0x04, 0xa0, 0xdb, 0x39, 0x86, 0x54, 0xaa, 0x8c, 0x34, 0x21, 0x8b, 0xf8, 0x0c, 0x74, 0x67,
+    ],
+    # S3
+    [
+        0x68, 0x8d, 0xca, 0x4d, 0x73, 0x4b, 0x4e, 0x2a, 0xd4, 0x52, 0x26, 0xb3, 0x54, 0x1e, 0x19, 0x1f,
+        0x22, 0x03, 0x46, 0x3d, 0x2d, 0x4a, 0x53, 0x83, 0x13, 0x8a, 0xb7, 0xd5, 0x25, 0x79, 0xf5, 0xbd,
+        0x58, 0x2f, 0x0d, 0x02, 0xed, 0x51, 0x9e, 0x11, 0xf2, 0x3e, 0x55, 0x5e, 0xd1, 0x16, 0x3c, 0x66,
+        0x70, 0x5d, 0xf3, 0x45, 0x40, 0xcc, 0xe8, 0x94, 0x56, 0x08, 0xce, 0x1a, 0x3a, 0xd2, 0xe1, 0xdf,
+        0xb5, 0x38, 0x6e, 0x0e, 0xe5, 0xf4, 0xf9, 0x86, 0xe9, 0x4f, 0xd6, 0x85, 0x23, 0xcf, 0x32, 0x99,
+        0x31, 0x14, 0xae, 0xee, 0xc8, 0x48, 0xd3, 0x30, 0xa1, 0x92, 0x41, 0xb1, 0x18, 0xc4, 0x2c, 0x71,
+        0x72, 0x44, 0x15, 0xfd, 0x37, 0xbe, 0x5f, 0xaa, 0x9b, 0x88, 0xd8, 0xab, 0x89, 0x9c, 0xfa, 0x60,
+        0xea, 0xbc, 0x62, 0x0c, 0x24, 0xa6, 0xa8, 0xec, 0x67, 0x20, 0xdb, 0x7c, 0x28, 0xdd, 0xac, 0x5b,
+        0x34, 0x7e, 0x10, 0xf1, 0x7b, 0x8f, 0x63, 0xa0, 0x05, 0x9a, 0x43, 0x77, 0x21, 0xbf, 0x27, 0x09,
+        0xc3, 0x9f, 0xb6, 0xd7, 0x29, 0xc2, 0xeb, 0xc0, 0xa4, 0x8b, 0x8c, 0x1d, 0xfb, 0xff, 0xc1, 0xb2,
+        0x97, 0x2e, 0xf8, 0x65, 0xf6, 0x75, 0x07, 0x04, 0x49, 0x33, 0xe4, 0xd9, 0xb9, 0xd0, 0x42, 0xc7,
+        0x6c, 0x90, 0x00, 0x8e, 0x6f, 0x50, 0x01, 0xc5, 0xda, 0x47, 0x3f, 0xcd, 0x69, 0xa2, 0xe2, 0x7a,
+        0xa7, 0xc6, 0x93, 0x0f, 0x0a, 0x06, 0xe6, 0x2b, 0x96, 0xa3, 0x1c, 0xaf, 0x6a, 0x12, 0x84, 0x39,
+        0xe7, 0xb0, 0x82, 0xf7, 0xfe, 0x9d, 0x87, 0x5c, 0x81, 0x35, 0xde, 0xb4, 0xa5, 0xfc, 0x80, 0xef,
+        0xcb, 0xbb, 0x6b, 0x76, 0xba, 0x5a, 0x7d, 0x78, 0x0b, 0x95, 0xe3, 0xad, 0x74, 0x98, 0x3b, 0x36,
+        0x64, 0x6d, 0xdc, 0xf0, 0x59, 0xa9, 0x4c, 0x17, 0x7f, 0x91, 0xb8, 0xc9, 0x57, 0x1b, 0xe0, 0x61,
+    ],
+]
+
+# Обернені S-box'
+S_BOX_DEC = [None] * 4
+for _i in range(4):
+    S_BOX_DEC[_i] = [0] * 256
+    for _j in range(256):
+        S_BOX_DEC[_i][S_BOX_ENC[_i][_j]] = _j
+
+# MDS-матриця 8x8 над GF(2^8) з поліномом x^8+x^4+x^3+x^2+1
+MDS_MATRIX = [
+    [0x01, 0x01, 0x05, 0x01, 0x08, 0x06, 0x07, 0x04],
+    [0x04, 0x01, 0x01, 0x05, 0x01, 0x08, 0x06, 0x07],
+    [0x07, 0x04, 0x01, 0x01, 0x05, 0x01, 0x08, 0x06],
+    [0x06, 0x07, 0x04, 0x01, 0x01, 0x05, 0x01, 0x08],
+    [0x08, 0x06, 0x07, 0x04, 0x01, 0x01, 0x05, 0x01],
+    [0x01, 0x08, 0x06, 0x07, 0x04, 0x01, 0x01, 0x05],
+    [0x05, 0x01, 0x08, 0x06, 0x07, 0x04, 0x01, 0x01],
+    [0x01, 0x05, 0x01, 0x08, 0x06, 0x07, 0x04, 0x01],
+]
+
+MDS_INV_MATRIX = [
+    [0xAD, 0x95, 0x76, 0xA8, 0x2F, 0x49, 0xD7, 0xCA],
+    [0xCA, 0xAD, 0x95, 0x76, 0xA8, 0x2F, 0x49, 0xD7],
+    [0xD7, 0xCA, 0xAD, 0x95, 0x76, 0xA8, 0x2F, 0x49],
+    [0x49, 0xD7, 0xCA, 0xAD, 0x95, 0x76, 0xA8, 0x2F],
+    [0x2F, 0x49, 0xD7, 0xCA, 0xAD, 0x95, 0x76, 0xA8],
+    [0xA8, 0x2F, 0x49, 0xD7, 0xCA, 0xAD, 0x95, 0x76],
+    [0x76, 0xA8, 0x2F, 0x49, 0xD7, 0xCA, 0xAD, 0x95],
+    [0x95, 0x76, 0xA8, 0x2F, 0x49, 0xD7, 0xCA, 0xAD],
+]
+
+MASK64 = 0xFFFFFFFFFFFFFFFF
+
+
+def bytes_to_words(data: bytes) -> List[int]:
+    #Конвертує байти у список 64-бітних слів
+    words = []
+    for i in range(0, len(data), 8):
+        words.append(int.from_bytes(data[i:i+8], 'little'))
+    return words
+
+
+def words_to_bytes(words: List[int], nb: int) -> bytes:
+    #Конвертує список 64-бітних слів у байти
+    result = b''
+    for i in range(nb):
+        result += (words[i] & MASK64).to_bytes(8, 'little')
+    return result
+
+
+def state_to_matrix(state: List[int], nb: int) -> List[List[int]]:
+    # розкладає два 64-бітних слова у матрицю 8×2 байтів для операцій ShiftRows та MixColumns
+    matrix = [[0]*nb for _ in range(8)]
+    for col in range(nb):
+        for row in range(8):
+            matrix[row][col] = (state[col] >> (row * 8)) & 0xFF
+    return matrix
+
+
+def matrix_to_state(matrix: List[List[int]], nb: int) -> List[int]:
+    # Обернене до state_to_matrix.
+    state = [0] * nb
+    for col in range(nb):
+        for row in range(8):
+            state[col] |= matrix[row][col] << (row * 8)
+    return state
+
+
+def gf_mult(a: int, b: int) -> int:
+    # Множення у GF(2^8) з поліномом x^8+x^4+x^3+x^2+1 
+    r = 0
+    for _ in range(8):
+        if b & 1:
+            r ^= a
+        hi_bit = a & 0x80
+        a = (a << 1) & 0xFF
+        #Якщо перед зсувов старший біт був 1, значить результат вилізе за 8 біт. КСОР з поліномом зведення поверне його у 0-255.
+        if hi_bit:
+            a ^= REDUCTION_POLY
+        # b >>= 1 — зсуваємо b вправо, щоб на наступній ітерації перевірити наступний біт.
+        b >>= 1
+    return r
+
+# Раундові перетворення
+
+def sub_bytes(state: List[int], nb: int) -> List[int]:
+    # Заміна байтів через 4 S-box'и
+    new_state = [0] * nb
+    for i in range(nb):
+        val = 0
+        for byte_pos in range(8):
+            b = (state[i] >> (byte_pos * 8)) & 0xFF
+            s = S_BOX_ENC[byte_pos % 4][b]
+            val |= s << (byte_pos * 8)
+        new_state[i] = val
+    return new_state
+
+
+def inv_sub_bytes(state: List[int], nb: int) -> List[int]:
+    # Обернена заміна байтів через 4 S-box'и
+    new_state = [0] * nb
+    for i in range(nb):
+        val = 0
+        for byte_pos in range(8):
+            b = (state[i] >> (byte_pos * 8)) & 0xFF
+            s = S_BOX_DEC[byte_pos % 4][b]
+            val |= s << (byte_pos * 8)
+        new_state[i] = val
+    return new_state
+
+
+def shift_rows(state: List[int], nb: int) -> List[int]:
+    # Зсув рядків
+    matrix = state_to_matrix(state, nb)
+    new_matrix = [[0]*nb for _ in range(8)]
+    shift = -1
+    for row in range(8):
+        if row % (8 // nb) == 0:
+            shift += 1
+        for col in range(nb):
+            new_matrix[row][(col + shift) % nb] = matrix[row][col]
+    return matrix_to_state(new_matrix, nb)
+
+
+def inv_shift_rows(state: List[int], nb: int) -> List[int]:
+    # Обернений зсув рядків
+    matrix = state_to_matrix(state, nb)
+    new_matrix = [[0]*nb for _ in range(8)]
+    shift = -1
+    for row in range(8):
+        if row % (8 // nb) == 0:
+            shift += 1
+        for col in range(nb):
+            new_matrix[row][col] = matrix[row][(col + shift) % nb]
+    return matrix_to_state(new_matrix, nb)
+
+
+def mix_columns(state: List[int], nb: int) -> List[int]:
+    # Перемішування стовпців через MDS-матрицю
+    matrix = state_to_matrix(state, nb)
+    new_state = [0] * nb
+    for col in range(nb):
+        result = 0
+        for row in range(8):
+            product = 0
+            for b in range(8):
+                product ^= gf_mult(matrix[b][col], MDS_MATRIX[row][b])
+            result |= product << (row * 8)
+        new_state[col] = result
+    return new_state
+
+
+def inv_mix_columns(state: List[int], nb: int) -> List[int]:
+    # Обернене перемішування стовпців
+    matrix = state_to_matrix(state, nb)
+    new_state = [0] * nb
+    for col in range(nb):
+        result = 0
+        for row in range(8):
+            product = 0
+            for b in range(8):
+                product ^= gf_mult(matrix[b][col], MDS_INV_MATRIX[row][b])
+            result |= product << (row * 8)
+        new_state[col] = result
+    return new_state
+
+
+def add_round_key(state: List[int], rk: List[int], nb: int) -> List[int]:
+    # Додавання раундового ключа (mod 2^64)
+    return [(state[i] + rk[i]) & MASK64 for i in range(nb)]
+
+
+def sub_round_key(state: List[int], rk: List[int], nb: int) -> List[int]:
+    # Віднімання раундового ключа (mod 2^64)
+    return [(state[i] - rk[i]) & MASK64 for i in range(nb)]
+
+
+def xor_round_key(state: List[int], rk: List[int], nb: int) -> List[int]:
+    # XOR з раундовим ключем
+    return [state[i] ^ rk[i] for i in range(nb)]
+
+
+def encipher_round(state: List[int], nb: int) -> List[int]:
+    #Один раунд шифрування: SubBytes -> ShiftRows -> MixColumns
+    state = sub_bytes(state, nb)
+    state = shift_rows(state, nb)
+    state = mix_columns(state, nb)
+    return state
+
+
+def decipher_round(state: List[int], nb: int) -> List[int]:
+    # Один раунд розшифрування: InvMixColumns -> InvShiftRows -> InvSubBytes
+    state = inv_mix_columns(state, nb)
+    state = inv_shift_rows(state, nb)
+    state = inv_sub_bytes(state, nb)
+    return state
+
+
+# Key Schedule (розширення ключа)
+
+def rotate_words(nk: int, data: List[int]) -> List[int]:
+    #Циклічний зсув масиву слів вліво на 1 позицію
+    return data[1:] + data[:1]
+
+
+def shift_left_words(state: List[int]) -> List[int]:
+    #Зсув кожного слова вліво на 1 біт
+    return [(w << 1) & MASK64 for w in state]
+
+
+def rotate_left_bytes(nb: int, state: List[int]) -> List[int]:
+    #Циклічний зсув байтів вліво на (2*nb + 3) позицій
+    data = words_to_bytes(state, nb)
+    rotate_bytes = 2 * nb + 3
+    data_list = list(data)
+    rotated = data_list[rotate_bytes:] + data_list[:rotate_bytes]
+    return bytes_to_words(bytes(rotated))
+
+
+def key_expand_kt(key_words: List[int], nb: int, nk: int) -> List[int]:
+    #Обчислення проміжного значення KT для розширення ключа
+    state = [0] * nb
+    state[0] = (nb + nk + 1) & MASK64
+
+    k0 = key_words[:nb]
+    if nb == nk:
+        k1 = key_words[:nb]
+    else:
+        k1 = key_words[nb:nb+nb]
+
+    state = add_round_key(state, k0, nb)
+    state = encipher_round(state, nb)
+    state = xor_round_key(state, k1, nb)
+    state = encipher_round(state, nb)
+    state = add_round_key(state, k0, nb)
+    state = encipher_round(state, nb)
+
+    return state[:]
+
+
+def key_expand_even(key_words: List[int], kt: List[int], nb: int, nk: int, nr: int) -> List[List[int]]:
+    #Генерація парних раундових ключів
+    round_keys = [None] * (nr + 1)
+    initial_data = key_words[:]
+    tmv = [0x0001000100010001] * nb
+    rnd = 0
+    while True:
+        state = kt[:]
+        state = add_round_key(state, tmv, nb)
+        kt_round = state[:]
+        state = initial_data[:nb]
+        state = add_round_key(state, kt_round, nb)
+        state = encipher_round(state, nb)
+        state = xor_round_key(state, kt_round, nb)
+        state = encipher_round(state, nb)
+        state = add_round_key(state, kt_round, nb)
+        round_keys[rnd] = state[:]
+        if rnd == nr:
+            break
+        if nk != nb:
+            rnd += 2
+            tmv = shift_left_words(tmv)
+            state = kt[:]
+            state = add_round_key(state, tmv, nb)
+            kt_round = state[:]
+            state = initial_data[nb:nb+nb]
+            state = add_round_key(state, kt_round, nb)
+            state = encipher_round(state, nb)
+            state = xor_round_key(state, kt_round, nb)
+            state = encipher_round(state, nb)
+            state = add_round_key(state, kt_round, nb)
+            round_keys[rnd] = state[:]
+            if rnd == nr:
+                break
+        rnd += 2
+        tmv = shift_left_words(tmv)
+        initial_data = rotate_words(nk, initial_data)
+    return round_keys
+
+
+def key_expand_odd(round_keys: List[List[int]], nb: int, nr: int) -> List[List[int]]:
+    # Генерація непарних раундових ключів (RotateLeft від попереднього парного)
+    for i in range(1, nr, 2):
+        round_keys[i] = rotate_left_bytes(nb, round_keys[i - 1])
+    return round_keys
+
+
+def kalyna_key_expand(key: bytes) -> List[List[int]]:
+    #Повне розширення ключа для Kalyna-128/256
+    key_words = bytes_to_words(key)
+    kt = key_expand_kt(key_words, NB, NK)
+    round_keys = key_expand_even(key_words, kt, NB, NK, NR)
+    round_keys = key_expand_odd(round_keys, NB, NR)
+    return round_keys
+
+
+# Шифрування / Розшифрування одного блоку
+def kalyna_encrypt_block(plaintext: bytes, round_keys: List[List[int]]) -> bytes:
+    """Шифрування одного 128-бітного блоку."""
+    state = bytes_to_words(plaintext)
+
+    state = add_round_key(state, round_keys[0], NB)
+
+    for rnd in range(1, NR):
+        state = encipher_round(state, NB)
+        state = xor_round_key(state, round_keys[rnd], NB)
+
+    # Останній раунд: EncipherRound + додавання ключа NR (mod 2^64)
+    state = encipher_round(state, NB)
+    state = add_round_key(state, round_keys[NR], NB)
+
+    return words_to_bytes(state, NB)
+
+
+def kalyna_decrypt_block(ciphertext: bytes, round_keys: List[List[int]]) -> bytes:
+    """Розшифрування одного 128-бітного блоку."""
+    state = bytes_to_words(ciphertext)
+
+    # Post-whitening: віднімання ключа раунду NR
+    state = sub_round_key(state, round_keys[NR], NB)
+
+    # Раунди NR-1 .. 1: DecipherRound + XOR ключ
+    for rnd in range(NR - 1, 0, -1):
+        state = decipher_round(state, NB)
+        state = xor_round_key(state, round_keys[rnd], NB)
+
+    # Перший раунд розшифрування + віднімання ключа 0
+    state = decipher_round(state, NB)
+    state = sub_round_key(state, round_keys[0], NB)
+
+    return words_to_bytes(state, NB)
+
+
+# Режим CBC (Cipher Block Chaining)
+
+def pad_pkcs7(data: bytes, block_size: int = BLOCK_SIZE) -> bytes:
+    #PKCS#7 padding
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len] * pad_len)
+
+
+def unpad_pkcs7(data: bytes) -> bytes:
+    #Зняття PKCS#7 padding
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > BLOCK_SIZE:
+        raise ValueError("Невірний padding")
+    if data[-pad_len:] != bytes([pad_len] * pad_len):
+        raise ValueError("Невірний padding")
+    return data[:-pad_len]
+
+
+def xor_bytes(a: bytes, b: bytes) -> bytes:
+    return bytes(x ^ y for x, y in zip(a, b))
+
+
+def kalyna_cbc_encrypt(plaintext: bytes, key: bytes, iv: bytes) -> bytes:
+    #Шифрування в режимі CBC
+    assert len(key) == KEY_SIZE, f"Ключ має бути {KEY_SIZE} байт"
+    assert len(iv) == BLOCK_SIZE, f"IV має бути {BLOCK_SIZE} байт"
+
+    round_keys = kalyna_key_expand(key)
+    padded = pad_pkcs7(plaintext)
+    ciphertext = b''
+    prev_block = iv
+
+    for i in range(0, len(padded), BLOCK_SIZE):
+        block = padded[i:i+BLOCK_SIZE]
+        block = xor_bytes(block, prev_block)
+        enc_block = kalyna_encrypt_block(block, round_keys)
+        ciphertext += enc_block
+        prev_block = enc_block
+
+    return ciphertext
+
+
+def kalyna_cbc_decrypt(ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
+    #Розшифрування в режимі CBC
+    assert len(key) == KEY_SIZE
+    assert len(iv) == BLOCK_SIZE
+    assert len(ciphertext) % BLOCK_SIZE == 0
+
+    round_keys = kalyna_key_expand(key)
+    plaintext = b''
+    prev_block = iv
+
+    for i in range(0, len(ciphertext), BLOCK_SIZE):
+        block = ciphertext[i:i+BLOCK_SIZE]
+        dec_block = kalyna_decrypt_block(block, round_keys)
+        plaintext += xor_bytes(dec_block, prev_block)
+        prev_block = block
+
+    return unpad_pkcs7(plaintext)
+
+
+# ===========================================================================
+# Тести
+# ===========================================================================
+
+def test_single_block():
+    """Тест: шифрування/розшифрування одного блоку."""
+    print("=" * 60)
+    print("ТЕСТ 1: Шифрування/розшифрування одного блоку")
+    print("=" * 60)
+
+    key = bytes(range(32))  # 0x00..0x1F
+    plaintext = bytes(range(16))  # 0x00..0x0F
+
+    round_keys = kalyna_key_expand(key)
+    ct = kalyna_encrypt_block(plaintext, round_keys)
+    pt = kalyna_decrypt_block(ct, round_keys)
+
+    print(f"  Ключ:          {key.hex()}")
+    print(f"  Відкритий текст: {plaintext.hex()}")
+    print(f"  Шифротекст:     {ct.hex()}")
+    print(f"  Розшифровано:   {pt.hex()}")
+
+    assert pt == plaintext, "ПОМИЛКА: розшифрований текст не збігається!"
+    print("  ✓ Тест пройдено: розшифрування збігається з оригіналом\n")
+
+
+def test_cbc_mode():
+    """Тест: CBC режим з текстом різної довжини."""
+    print("=" * 60)
+    print("ТЕСТ 2: CBC режим шифрування/розшифрування")
+    print("=" * 60)
+
+    key = os.urandom(KEY_SIZE)
+    iv = os.urandom(BLOCK_SIZE)
+
+    test_messages = [
+        b"Hello!",
+        b"Kalyna cipher test message 1234",
+        b"A" * 100,
+        "Слава Україні! Тестування шифру Калина.".encode('utf-8'),
+        b"",
+    ]
+
+    for i, msg in enumerate(test_messages):
+        ct = kalyna_cbc_encrypt(msg, key, iv)
+        pt = kalyna_cbc_decrypt(ct, key, iv)
+        status = "✓" if pt == msg else "✗ ПОМИЛКА"
+        print(f"  Повідомлення {i+1} ({len(msg)} байт): {status}")
+        assert pt == msg
+
+    print("  ✓ Усі тести CBC пройдено\n")
+
+
+def test_file_encryption():
+    """Тест: шифрування текстового файлу."""
+    print("=" * 60)
+    print("ТЕСТ 3: Шифрування/розшифрування файлу")
+    print("=" * 60)
+
+    # Створюємо тестовий файл
+    test_content = ("Це тестовий файл для перевірки шифрування алгоритмом Калина (ДСТУ 7624:2014).\n"
+                    "Kalyna is the Ukrainian national encryption standard.\n"
+                    "Рядок 3: абвгґдеєжзиіїйклмнопрстуфхцчшщьюя\n") * 10
+    test_bytes = test_content.encode('utf-8')
+
+    with open('/tmp/test_plain.txt', 'wb') as f:
+        f.write(test_bytes)
+
+    key = os.urandom(KEY_SIZE)
+    iv = os.urandom(BLOCK_SIZE)
+
+    # Шифрування
+    ct = kalyna_cbc_encrypt(test_bytes, key, iv)
+    with open('/tmp/test_encrypted.bin', 'wb') as f:
+        f.write(ct)
+
+    # Розшифрування
+    pt = kalyna_cbc_decrypt(ct, key, iv)
+    with open('/tmp/test_decrypted.txt', 'wb') as f:
+        f.write(pt)
+
+    assert pt == test_bytes
+    print(f"  Розмір відкритого тексту:  {len(test_bytes)} байт")
+    print(f"  Розмір шифротексту:        {len(ct)} байт")
+    print(f"  ✓ Файл успішно зашифровано та розшифровано\n")
+
+
+# ===========================================================================
+# Main
+# ===========================================================================
+
+if __name__ == '__main__':
+    print()
+    print("Шифр «Калина» (Kalyna-128/256)")
+    print()
+
+    test_single_block()
+    test_cbc_mode()
+    test_file_encryption()
+
+    print("Усі тести завершено успішно!")
