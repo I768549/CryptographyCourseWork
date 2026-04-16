@@ -8,6 +8,9 @@ from LabThree.kalyna import (
     KEY_SIZE, BLOCK_SIZE,
 )
 from LabFour.ElipticCurve import ElipticCurve
+from LabFive.ProtocolUser import ProtocolUser, curve as ecdh_curve
+from LabSix.RSA import RSA
+import hashlib
 import math
 import os
 
@@ -726,6 +729,361 @@ class ElipticCurveTab(ttk.Frame):
         self.output_txt.delete("1.0", "end")
 
 
+# ─────────────────── ECDH + AES-GCM chat tab ─────────────────
+class ECDHChatTab(ttk.Frame):
+    """Tab for ECDH key exchange (secp256r1) + AES-256-GCM messaging."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.alice = None
+        self.bob = None
+        self.alice_key = None
+        self.bob_key = None
+        self._build_ui()
+
+    # ── UI ──────────────────────────────────────────────────────
+    def _build_ui(self):
+        # --- key exchange panel ---
+        top = ttk.LabelFrame(self, text="1. Key exchange (ECDH, secp256r1)")
+        top.pack(fill="x", padx=8, pady=4)
+
+        btn_row = ttk.Frame(top)
+        btn_row.pack(fill="x", padx=6, pady=4)
+        ttk.Button(btn_row, text="Generate Alice/Bob pair", command=self._generate_users).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Compute shared secret",   command=self._compute_secret).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Reset",                   command=self._reset).pack(side="right", padx=4)
+
+        self.status_var = tk.StringVar(value="Keys not generated.")
+        ttk.Label(top, textvariable=self.status_var, foreground="#2565d6").pack(anchor="w", padx=8, pady=(0, 6))
+
+        self.keys_txt = scrolledtext.ScrolledText(top, wrap="word", height=11, font=("Hack", 10))
+        self.keys_txt.pack(fill="x", padx=6, pady=(0, 6))
+
+        # --- messaging panel ---
+        mid = ttk.LabelFrame(self, text="2. Messaging (AES-256-GCM)")
+        mid.pack(fill="x", padx=8, pady=4)
+
+        sender_row = ttk.Frame(mid)
+        sender_row.pack(fill="x", padx=6, pady=4)
+        ttk.Label(sender_row, text="Sender:").pack(side="left")
+        self.sender_var = tk.StringVar(value="alice")
+        ttk.Radiobutton(sender_row, text="Alice - Bob", variable=self.sender_var, value="alice").pack(side="left", padx=8)
+        ttk.Radiobutton(sender_row, text="Bob - Alice", variable=self.sender_var, value="bob").pack(side="left", padx=8)
+
+        self.show_details_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(sender_row, text="Show nonce/ciphertext/tag",
+                        variable=self.show_details_var).pack(side="right", padx=8)
+
+        ttk.Label(mid, text="Message:").pack(anchor="w", padx=8)
+        self.msg_txt = scrolledtext.ScrolledText(mid, wrap="word", height=3, font=("Hack", 11))
+        self.msg_txt.pack(fill="x", padx=6, pady=4)
+
+        send_row = ttk.Frame(mid)
+        send_row.pack(fill="x", padx=6, pady=4)
+        ttk.Button(send_row, text="[+] Encrypt & send", command=self._send).pack(side="left", padx=4)
+        ttk.Button(send_row, text="[x] Clear chat", command=self._clear_chat).pack(side="right", padx=4)
+
+        # --- chat log ---
+        self.chat_txt = make_text_block(self, "Chat log", height=14)
+        self.chat_txt.tag_configure("alice", foreground="#c33")
+        self.chat_txt.tag_configure("bob",   foreground="#093")
+        self.chat_txt.tag_configure("system",foreground="#888", font=("Hack", 9, "italic"))
+        self.chat_txt.tag_configure("detail",foreground="#555", font=("Hack", 9))
+        self.chat_txt.tag_configure("error", foreground="#a00", font=("Hack", 10, "bold"))
+
+    # ── helpers ─────────────────────────────────────────────────
+    def _log(self, text, tag=None):
+        if tag:
+            self.chat_txt.insert("end", text + "\n", tag)
+        else:
+            self.chat_txt.insert("end", text + "\n")
+        self.chat_txt.see("end")
+
+    def _write_keys(self, text):
+        self.keys_txt.delete("1.0", "end")
+        self.keys_txt.insert("1.0", text)
+
+    def _users_ready(self):
+        if self.alice is None or self.bob is None:
+            messagebox.showwarning("Keys", "Generate the Alice/Bob pair first.")
+            return False
+        return True
+
+    def _keys_ready(self):
+        if self.alice_key is None or self.bob_key is None:
+            messagebox.showwarning("Keys", "Compute the shared secret first.")
+            return False
+        return True
+
+    # ── actions ─────────────────────────────────────────────────
+    def _generate_users(self):
+        self.alice = ProtocolUser("Alice")
+        self.bob = ProtocolUser("Bob")
+        self.alice_key = None
+        self.bob_key = None
+        self.status_var.set("Key pairs generated. Now compute the shared secret.")
+
+        lines = [
+            f"Generator G (shared curve parameter, secp256r1):",
+            f"       G.x = {hex(ecdh_curve.g.x)}",
+            f"       G.y = {hex(ecdh_curve.g.y)}",
+            "",
+            f"Alice  d = {hex(self.alice.private_key)}",
+            f"       Q.x = {hex(self.alice.public_key.x)}",
+            f"       Q.y = {hex(self.alice.public_key.y)}",
+            "",
+            f"Bob    d = {hex(self.bob.private_key)}",
+            f"       Q.x = {hex(self.bob.public_key.x)}",
+            f"       Q.y = {hex(self.bob.public_key.y)}",
+        ]
+        self._write_keys("\n".join(lines))
+        self._log("[system] Generated new key pairs for Alice and Bob.", "system")
+
+    def _compute_secret(self):
+        if not self._users_ready():
+            return
+        s_alice = self.alice.compute_shared_secret(self.bob.public_key)
+        s_bob = self.bob.compute_shared_secret(self.alice.public_key)
+        self.alice_key = self.alice.derive_key()
+        self.bob_key = self.bob.derive_key()
+
+        match = s_alice == s_bob and self.alice_key == self.bob_key
+        self.status_var.set(
+            f"Shared secret computed. Keys match: {match}"
+        )
+
+        lines = [
+            f"Shared point S = d·Q",
+            f"  x = {hex(s_alice.x)}",
+            f"  y = {hex(s_alice.y)}",
+            "",
+            f"HKDF-SHA256 key ({len(self.alice_key)*8} bits):",
+            f"  {self.alice_key.hex()}",
+            "",
+            f"Both parties' keys match: {match}",
+        ]
+        self._write_keys("\n".join(lines))
+        self._log("[system] ECDH exchange complete, symmetric key derived via HKDF-SHA256.", "system")
+
+    def _send(self):
+        if not self._keys_ready():
+            return
+        text = self.msg_txt.get("1.0", "end").strip()
+        if not text:
+            messagebox.showwarning("Empty", "Enter a message.")
+            return
+
+        if self.sender_var.get() == "alice":
+            sender, receiver = self.alice, self.bob
+            s_key, r_key, s_tag, r_tag = self.alice_key, self.bob_key, "alice", "bob"
+        else:
+            sender, receiver = self.bob, self.alice
+            s_key, r_key, s_tag, r_tag = self.bob_key, self.alice_key, "bob", "alice"
+
+        nonce, ciphertext, tag = ProtocolUser.encrypt(s_key, text)
+        self._log(f"{sender.name}:  {text}", s_tag)
+
+        if self.show_details_var.get():
+            self._log(f"    nonce      = {nonce.hex()}", "detail")
+            self._log(f"    ciphertext = {ciphertext.hex()}", "detail")
+            self._log(f"    tag        = {tag.hex()}", "detail")
+
+        try:
+            decrypted = ProtocolUser.decrypt(r_key, nonce, ciphertext, tag)
+            self._log(f"{receiver.name} <- decrypted: {decrypted}", r_tag)
+        except Exception as e:
+            self._log(f"{receiver.name} <- decryption error: {e}", "error")
+
+        self._log("", None)
+        self.msg_txt.delete("1.0", "end")
+
+    def _reset(self):
+        self.alice = None
+        self.bob = None
+        self.alice_key = None
+        self.bob_key = None
+        self.status_var.set("Keys not generated.")
+        self.keys_txt.delete("1.0", "end")
+        self._log("[system] Keys and session state reset.", "system")
+
+    def _clear_chat(self):
+        self.chat_txt.delete("1.0", "end")
+
+
+# ────────────────────── RSA signature tab ─────────────────────
+class RSATab(ttk.Frame):
+    """Tab for RSA digital signatures (SHA-256 hash, textbook RSA)."""
+
+    DEFAULT_P = "87782545971786228507785835430902851888373658034361481047774422628849988620823"
+    DEFAULT_Q = "75038126294588517344485100967171316821698786760273254868732534194319648035903"
+    DEFAULT_E = "65537"
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.rsa = None
+        self._build_ui()
+
+    # ── UI ──────────────────────────────────────────────────────
+    def _build_ui(self):
+        # --- parameters panel ---
+        params = ttk.LabelFrame(self, text="1. RSA parameters  (n = p·q,  d = e⁻¹ mod φ(n))")
+        params.pack(fill="x", padx=8, pady=4)
+        params.columnconfigure(1, weight=1)
+
+        self.p_var = make_label_entry(params, "p (prime):", row=0, default=self.DEFAULT_P, width=70)
+        self.q_var = make_label_entry(params, "q (prime):", row=1, default=self.DEFAULT_Q, width=70)
+        self.e_var = make_label_entry(params, "e (public exponent):", row=2, default=self.DEFAULT_E, width=20)
+
+        btn_row = ttk.Frame(params)
+        btn_row.grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=4)
+        ttk.Button(btn_row, text="Apply parameters",        command=self._apply).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Generate random primes",  command=self._generate_primes).pack(side="left", padx=4)
+
+        self.status_var = tk.StringVar(value="Parameters not applied.")
+        ttk.Label(params, textvariable=self.status_var, foreground="#2565d6").grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6)
+        )
+
+        self.keys_txt = scrolledtext.ScrolledText(params, wrap="word", height=6, font=("Hack", 10))
+        self.keys_txt.grid(row=5, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 6))
+
+        # --- message + signature panel ---
+        msg_frame = ttk.LabelFrame(self, text="2. Message & signature")
+        msg_frame.pack(fill="both", expand=True, padx=8, pady=4)
+
+        ttk.Label(msg_frame, text="Message:").pack(anchor="w", padx=8, pady=(4, 0))
+        self.msg_txt = scrolledtext.ScrolledText(msg_frame, wrap="word", height=5, font=("Hack", 11))
+        self.msg_txt.pack(fill="both", expand=True, padx=6, pady=4)
+
+        sig_row = ttk.Frame(msg_frame)
+        sig_row.pack(fill="x", padx=6, pady=4)
+        sig_row.columnconfigure(1, weight=1)
+        ttk.Label(sig_row, text="Signature (int):").grid(row=0, column=0, sticky="w", padx=4)
+        self.sig_var = tk.StringVar()
+        ttk.Entry(sig_row, textvariable=self.sig_var, font=("Hack", 10)).grid(row=0, column=1, sticky="we", padx=4)
+
+        btn = ttk.Frame(msg_frame)
+        btn.pack(fill="x", padx=6, pady=4)
+        ttk.Button(btn, text="[+] Sign",   command=self._sign).pack(side="left", padx=4)
+        ttk.Button(btn, text="[?] Verify", command=self._verify).pack(side="left", padx=4)
+        ttk.Button(btn, text="[x] Clear",  command=self._clear).pack(side="right", padx=4)
+
+        # --- log ---
+        self.log_txt = make_text_block(self, "Log", height=8)
+        self.log_txt.tag_configure("ok",    foreground="#093", font=("Hack", 10, "bold"))
+        self.log_txt.tag_configure("fail",  foreground="#a00", font=("Hack", 10, "bold"))
+        self.log_txt.tag_configure("info",  foreground="#555")
+        self.log_txt.tag_configure("hex",   foreground="#2565d6", font=("Hack", 10))
+
+    # ── helpers ─────────────────────────────────────────────────
+    def _log(self, text, tag=None):
+        if tag:
+            self.log_txt.insert("end", text + "\n", tag)
+        else:
+            self.log_txt.insert("end", text + "\n")
+        self.log_txt.see("end")
+
+    def _write_keys(self, text):
+        self.keys_txt.delete("1.0", "end")
+        self.keys_txt.insert("1.0", text)
+
+    def _ready(self):
+        if self.rsa is None:
+            messagebox.showwarning("RSA", "Apply parameters first.")
+            return False
+        return True
+
+    # ── actions ─────────────────────────────────────────────────
+    def _apply(self):
+        try:
+            p = int(self.p_var.get())
+            q = int(self.q_var.get())
+            e = int(self.e_var.get())
+        except ValueError:
+            messagebox.showerror("Error", "p, q, e must be integers.")
+            return
+        try:
+            self.rsa = RSA(p, q, e)
+        except Exception as ex:
+            self.rsa = None
+            messagebox.showerror("RSA error", str(ex))
+            return
+
+        phi = (p - 1) * (q - 1)
+        lines = [
+            f"n   = p·q          = {self.rsa.n}",
+            f"φ(n)= (p-1)(q-1)   = {phi}",
+            f"e   (public)       = {self.rsa.e}",
+            f"d   = e⁻¹ mod φ(n) = {self.rsa.d}",
+            "",
+            f"Public key:  (n, e)",
+            f"Private key: (n, d)",
+        ]
+        self._write_keys("\n".join(lines))
+        self.status_var.set(f"Parameters applied. Modulus size: {self.rsa.n.bit_length()} bits.")
+        self._log("[info] RSA keys computed.", "info")
+
+    def _generate_primes(self):
+        p, q = RSA.generate_primes(256)
+        self.p_var.set(str(p))
+        self.q_var.set(str(q))
+        self.e_var.set("65537")
+        self._log(f"[info] Generated fresh 256-bit primes (n ≈ {(p*q).bit_length()} bits). Click Apply to use them.", "info")
+
+    def _sign(self):
+        if not self._ready():
+            return
+        msg = self.msg_txt.get("1.0", "end").rstrip("\n")
+        if not msg:
+            messagebox.showwarning("Empty", "Enter a message to sign.")
+            return
+        h = int(hashlib.sha256(msg.encode("utf-8")).hexdigest(), 16)
+        try:
+            signature = self.rsa.sign(msg)
+        except Exception as e:
+            messagebox.showerror("Sign error", str(e))
+            return
+        self.sig_var.set(str(signature))
+
+        self._log(f"[sign] message  = {msg!r}", "info")
+        self._log(f"       SHA-256  = {h:064x}", "hex")
+        self._log(f"       s = H^d mod n = {signature}", "hex")
+        self._log("[ok] signed.", "ok")
+        self._log("", None)
+
+    def _verify(self):
+        if not self._ready():
+            return
+        msg = self.msg_txt.get("1.0", "end").rstrip("\n")
+        sig_str = self.sig_var.get().strip()
+        if not msg or not sig_str:
+            messagebox.showwarning("Empty", "Need both message and signature to verify.")
+            return
+        try:
+            signature = int(sig_str)
+        except ValueError:
+            messagebox.showerror("Error", "Signature must be an integer.")
+            return
+
+        h = int(hashlib.sha256(msg.encode("utf-8")).hexdigest(), 16)
+        recovered = pow(signature, self.rsa.e, self.rsa.n)
+        valid = self.rsa.verify_signature(msg, signature)
+
+        self._log(f"[verify] message    = {msg!r}", "info")
+        self._log(f"         SHA-256    = {h:064x}", "hex")
+        self._log(f"         s^e mod n  = {recovered:064x}", "hex")
+        if valid:
+            self._log("[ok] signature is VALID.", "ok")
+        else:
+            self._log("[fail] signature does NOT match.", "fail")
+        self._log("", None)
+
+    def _clear(self):
+        self.msg_txt.delete("1.0", "end")
+        self.sig_var.set("")
+        self.log_txt.delete("1.0", "end")
+
+
 # ───────────────────── placeholder tab ─────────────────────────
 class PlaceholderTab(ttk.Frame):
     """Placeholder for future cipher methods."""
@@ -772,6 +1130,8 @@ class CryptoApp(tk.Tk):
         self.notebook.add(GeneratorTab(self.notebook),             text="  PRNG  ")
         self.notebook.add(KalynaTab(self.notebook),               text="  Kalyna  ")
         self.notebook.add(ElipticCurveTab(self.notebook),         text="  Eliptic Curves Base  ")
+        self.notebook.add(ECDHChatTab(self.notebook),             text="  ECDH + AES Chat  ")
+        self.notebook.add(RSATab(self.notebook),                  text="  RSA Signature  ")
 
         # status bar
         self.status = ttk.Label(self, text="Ready", relief="sunken", anchor="w")
